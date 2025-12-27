@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>The 45kg Diary</title>
+    
+    <!-- PWA Meta Tags -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="45kg手帳">
+    <meta name="theme-color" content="#FDFBF9">
+    
+    <!-- 資源載入 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@400;700&family=Noto+Sans+TC:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- Firebase SDK (Compat 版本最穩定) -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+
+    <style>
+        body { font-family: 'Noto Sans TC', sans-serif; background-color: #FDFBF9; -webkit-tap-highlight-color: transparent; user-select: none; margin: 0; }
+        .font-serif { font-family: 'Noto Serif TC', serif; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(15px); } to { opacity: 1; transform: translateY(0); } }
+        .animate-fadeIn { animation: fadeIn 0.6s ease-out forwards; }
+        ::-webkit-scrollbar { width: 0px; background: transparent; }
+        .tab-active { color: #8D7B68; background-color: #FAF7F2; transform: scale(1.1); box-shadow: 0 4px 15px rgba(141,123,104,0.2); }
+    </style>
+</head>
+<body>
+    <div id="root">
+        <div style="height: 100vh; display: flex; align-items: center; justify-content: center; background: #FDFBF9; color: #8D7B68; font-family: serif;">
+            <p style="letter-spacing: 0.3em;">CRAFTING YOUR DIARY...</p>
+        </div>
+    </div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef } = React;
+
+        // --- 1. Firebase 配置 ---
+        // 注意：這裡使用的是預設測試配置。若要長期儲存數據，建議替換為妳自己的 Firebase Config。
+        const firebaseConfig = JSON.parse(window.__firebase_config || '{}');
+        firebase.initializeApp(firebaseConfig);
+        const auth = firebase.auth();
+        const db = firebase.firestore();
+        const appId = "milk-tea-diet-v39";
+
+        const App = () => {
+            const [user, setUser] = useState(null);
+            const [loading, setLoading] = useState(true);
+            const [activeTab, setActiveTab] = useState('home'); 
+            const [selectedDate, setSelectedDate] = useState(new Date().toLocaleDateString('en-CA'));
+            const [foodLogs, setFoodLogs] = useState([]);
+            const [weightLogs, setWeightLogs] = useState([]);
+            const [exerciseLogs, setExerciseLogs] = useState([]);
+            const [dailyHabits, setDailyHabits] = useState({ water: 0 });
+            const [dailyReview, setDailyReview] = useState("");
+            const [foodInput, setFoodInput] = useState('');
+            const [howIEat, setHowIEat] = useState('');
+            const [pendingImages, setPendingImages] = useState([]);
+            const [isAnalyzing, setIsAnalyzing] = useState(false);
+            const [isCoachLoading, setIsCoachLoading] = useState(false);
+            const [error, setError] = useState(null);
+
+            const fileInputRef = useRef(null);
+
+            // 目標數值
+            const targetKcal = 1150;
+            const targetP = 65; const targetF = 35; const targetC = 145; const targetWeight = 45.0;
+
+            useEffect(() => {
+                const unsub = auth.onAuthStateChanged((u) => {
+                    if (u) { setUser(u); setLoading(false); }
+                    else { auth.signInAnonymously(); }
+                });
+                return () => unsub();
+            }, []);
+
+            useEffect(() => {
+                if (!user) return;
+                const uid = user.uid;
+                const path = db.collection('artifacts').doc(appId).collection('users').doc(uid);
+                path.collection('foodLogs').onSnapshot(s => setFoodLogs(s.docs.map(d => ({id:d.id, ...d.data()}))));
+                path.collection('weightLogs').onSnapshot(s => setWeightLogs(s.docs.map(d => ({id:d.id, ...d.data()}))));
+                path.collection('exerciseLogs').onSnapshot(s => setExerciseLogs(s.docs.map(d => ({id:d.id, ...d.data()}))));
+                path.collection('dailyHabits').doc(selectedDate).onSnapshot(s => setDailyHabits(s.exists ? s.data() : {water:0}));
+                path.collection('dailyReviews').doc(selectedDate).onSnapshot(s => setDailyReview(s.exists ? s.data().text : ""));
+            }, [user, selectedDate]);
+
+            const currentDayFood = useMemo(() => foodLogs.filter(f => f.date === selectedDate).sort((a,b) => b.timestamp - a.timestamp), [foodLogs, selectedDate]);
+            const totals = useMemo(() => currentDayFood.reduce((acc, f) => ({
+                kcal: acc.kcal + (Number(f.calories) || 0),
+                p: acc.p + (Number(f.protein) || 0),
+                f: acc.f + (Number(f.fat) || 0),
+                c: acc.c + (Number(f.carbs) || 0),
+            }), { kcal: 0, p: 0, f: 0, c: 0 }), [currentDayFood]);
+
+            const weightStatus = useMemo(() => {
+                const sorted = [...weightLogs].sort((a,b) => b.timestamp - a.timestamp);
+                const w = sorted[0]?.morning || sorted[0]?.evening || targetWeight;
+                return (w - targetWeight).toFixed(1);
+            }, [weightLogs]);
+
+            const compressImage = (file) => {
+                return new Promise((resolve) => {
+                    const reader = new FileReader(); reader.readAsDataURL(file);
+                    reader.onload = (e) => {
+                        const img = new Image(); img.src = e.target.result;
+                        img.onload = () => {
+                            const canvas = document.createElement('canvas');
+                            const MAX_W = 500; canvas.width = MAX_W; canvas.height = img.height * (MAX_W / img.width);
+                            canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+                            resolve(canvas.toDataURL('image/jpeg', 0.5));
+                        };
+                    };
+                });
+            };
+
+            const processFood = async () => {
+                if (!foodInput.trim() && pendingImages.length === 0) return;
+                setIsAnalyzing(true); setError(null);
+                try {
+                    const parts = [{ text: `主食：${foodInput}, 細節：${howIEat}` }];
+                    pendingImages.forEach(img => parts.push({ inlineData: { mimeType: "image/jpeg", data: img.split(',')[1] } }));
+                    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${""}`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            contents: [{ parts }],
+                            systemInstruction: { parts: [{ text: "妳是資深營養師。分析照片並給出JSON: {foodName, calories, protein, fat, carbs, breakdown, advice}" }] },
+                            generationConfig: { responseMimeType: "application/json" }
+                        })
+                    });
+                    const result = JSON.parse((await res.json()).candidates[0].content.parts[0].text);
+                    await db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('foodLogs').add({
+                        ...result, howIEat, imageUrls: pendingImages, date: selectedDate, timestamp: Date.now()
+                    });
+                    setFoodInput(''); setHowIEat(''); setPendingImages([]);
+                } catch (e) { setError("辨識報告失敗"); } finally { setIsAnalyzing(false); }
+            };
+
+            if (loading) return null;
+
+            return (
+                <div className="min-h-screen pb-44 flex flex-col items-center bg-[#FDFBF9]">
+                    <div className="w-full h-1.5 bg-[#E6D5B8]"></div>
+                    <header className="w-full pt-12 pb-6 text-center sticky top-0 bg-[#FDFBF9]/95 backdrop-blur-md z-40">
+                        <h1 className="text-2xl font-serif tracking-[0.4em] text-[#8D7B68] uppercase font-bold">The 45kg Diary</h1>
+                        <input type="date" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)} className="mt-4 bg-white border border-[#E6D5B8]/30 rounded-full px-6 py-2 text-[10px] text-[#C4B5A5] outline-none shadow-sm" />
+                    </header>
+
+                    <main className="w-full max-w-md px-6 space-y-7 animate-fadeIn pt-4">
+                        {activeTab === 'home' && (
+                            <div className="space-y-7">
+                                <section className="bg-white rounded-[3rem] p-9 shadow-2xl border border-[#F3EDE4] space-y-8">
+                                    <div className="flex justify-between items-center px-1">
+                                        <div><p className="text-[10px] text-[#C4B5A5] uppercase font-bold">Today's Intake</p><h2 className="text-4xl font-serif text-[#8D7B68]">{totals.kcal} <span className="text-xs opacity-40">/ {targetKcal}k</span></h2></div>
+                                        <div className="text-right"><p className="text-[10px] text-[#C4B5A5] uppercase font-bold">Gap</p><span className="text-2xl font-serif text-[#D7CCC8]">+{weightStatus}kg</span></div>
+                                    </div>
+                                    <div className="space-y-6 pt-4 border-t border-[#FDFBF9]">
+                                        {[{l:'P 蛋白質',c:totals.p,t:targetP,cl:'bg-sky-200'},{l:'F 脂肪',c:totals.f,t:targetF,cl:'bg-orange-200'},{l:'C 碳水',c:totals.c,t:targetC,cl:'bg-emerald-200'}].map(item => (
+                                            <div key={item.l} className="space-y-2">
+                                                <div className="flex justify-between text-[11px] font-bold"><span className="text-[#8D7B68]">{item.l}</span><span>{item.c}g / {item.t}g</span></div>
+                                                <div className="h-2 w-full bg-[#FAF7F2] rounded-full overflow-hidden"><div className={`h-full ${item.cl} transition-all duration-1000`} style={{ width: `${Math.min(100, (item.c / item.t) * 100)}%` }} /></div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </section>
+
+                                <section className="bg-white rounded-[3.2rem] p-8 shadow-sm border border-[#F3EDE4] space-y-6">
+                                    <div className="flex gap-4">
+                                        <input type="text" placeholder="這餐點了什麼？" value={foodInput} onChange={(e) => setFoodInput(e.target.value)} className="flex-1 bg-[#FAF7F2] rounded-full px-6 py-5 text-xs outline-none" />
+                                        <button onClick={() => fileInputRef.current.click()} className="w-16 h-16 bg-[#E6D5B8] text-white rounded-full flex items-center justify-center shadow-lg active:scale-95 transition-all">📷</button>
+                                        <input type="file" accept="image/*" multiple className="hidden" ref={fileInputRef} onChange={async (e) => {
+                                            const res = await Promise.all(Array.from(e.target.files).map(f => compressImage(f)));
+                                            setPendingImages(prev => [...prev, ...res]);
+                                        }} />
+                                    </div>
+                                    {pendingImages.length > 0 && (
+                                        <div className="flex flex-wrap gap-3 p-4 bg-[#FAF7F2] rounded-[1.8rem] border border-dashed border-[#E6D5B8]">
+                                            {pendingImages.map((img, idx) => (
+                                                <div key={idx} className="relative w-18 h-18 rounded-2xl overflow-hidden shadow-sm">
+                                                    <img src={img} className="w-full h-full object-cover" />
+                                                    <button onClick={() => setPendingImages(p => p.filter((_, i) => i !== idx))} className="absolute top-0 right-0 bg-black/50 text-white text-[10px] p-2 rounded-bl-2xl">✕</button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                    <textarea placeholder="進食描述 (例如: 只吃一半)..." value={howIEat} onChange={(e) => setHowIEat(e.target.value)} className="w-full bg-[#FAF7F2] rounded-[2rem] p-6 text-xs outline-none min-h-[100px] resize-none" />
+                                    <button onClick={processFood} disabled={isAnalyzing || (!foodInput && !pendingImages.length)} className="w-full py-5 rounded-full text-xs font-bold uppercase tracking-[0.3em] shadow-xl bg-[#8D7B68] text-white active:scale-95 transition-all">
+                                        {isAnalyzing ? "Analyzing..." : "Confirm Meal"}
+                                    </button>
+                                </section>
+
+                                <div className="space-y-6">
+                                    {currentDayFood.map(log => (
+                                        <div key={log.id} className="bg-white p-8 rounded-[3rem] border border-[#F3EDE4] shadow-sm animate-fadeIn relative">
+                                            <div className="flex gap-6 items-center">
+                                                <div className="flex -space-x-5 shrink-0">
+                                                    {log.imageUrls?.length > 0 ? log.imageUrls.map((url, i) => (
+                                                        <div key={i} className="w-18 h-18 rounded-[1.5rem] border-2 border-white overflow-hidden shadow-md">
+                                                            <img src={url} className="w-full h-full object-cover" />
+                                                        </div>
+                                                    )) : <div className="w-18 h-18 rounded-[1.5rem] bg-[#FAF7F2] flex items-center justify-center text-[10px] text-[#C4B5A5] font-black uppercase tracking-tighter">Diary</div>}
+                                                </div>
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="flex items-center justify-between">
+                                                        <h4 className="text-base font-bold text-[#5D4E40] truncate pr-2 uppercase">{log.foodName || "Record"}</h4>
+                                                        <span className="text-sm font-serif text-[#8D7B68] bg-[#FAF7F2] px-4 py-1 rounded-full font-bold">{log.calories}k</span>
+                                                    </div>
+                                                    <div className="flex gap-2.5 mt-3">
+                                                        <span className="text-[9px] bg-sky-50 text-sky-600 px-2 py-1 rounded-lg font-bold uppercase">P:{log.protein}g</span>
+                                                        <span className="text-[9px] bg-orange-50 text-orange-600 px-2 py-1 rounded-lg font-bold uppercase">F:{log.fat}g</span>
+                                                        <span className="text-[9px] bg-emerald-50 text-emerald-600 px-2 py-1 rounded-lg font-bold uppercase">C:{log.carbs}g</span>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div className="mt-6 bg-[#FDFBF9] p-6 rounded-[2.2rem] border border-[#F3EDE4] space-y-4 shadow-inner text-[11px] leading-relaxed">
+                                                <div><span className="font-bold text-[#8D7B68]">🔍 Ingredients:</span> {log.breakdown}</div>
+                                                <div className="border-t border-[#F3EDE4] pt-4 italic"><span className="font-bold text-[#8D7B68]">💡 Advice:</span> {log.advice}</div>
+                                            </div>
+                                            <button onClick={() => db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('foodLogs').doc(log.id).delete()} className="absolute top-6 right-6 text-rose-200">✕</button>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'exercise' && (
+                            <div className="space-y-6 animate-fadeIn">
+                                <header className="text-center pt-4"><h2 className="text-lg font-serif text-[#8D7B68] tracking-widest uppercase">ACTIVE LOG</h2></header>
+                                <div className="bg-white rounded-[2.8rem] p-8 shadow-sm border border-[#F3EDE4] space-y-6 text-center">
+                                    <input type="text" placeholder="運動內容" id="exN" className="w-full bg-[#FAF7F2] rounded-full px-6 py-5 text-xs outline-none" />
+                                    <input type="number" placeholder="消耗大卡" id="exC" className="w-full bg-[#FAF7F2] rounded-full px-6 py-5 text-xs outline-none" />
+                                    <button onClick={async () => {
+                                        const n=document.getElementById('exN').value, c=document.getElementById('exC').value;
+                                        if(n&&c) await db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('exerciseLogs').add({name:n,cal:parseFloat(c),date:selectedDate,timestamp:Date.now()});
+                                        document.getElementById('exN').value=''; document.getElementById('exC').value='';
+                                    }} className="w-full py-5 bg-[#8D7B68] text-white rounded-full text-xs font-bold uppercase tracking-widest shadow-xl">Confirm Exercise</button>
+                                </div>
+                                <div className="space-y-4">
+                                    {exerciseLogs.filter(e=>e.date===selectedDate).map(ex => (
+                                        <div key={ex.id} className="bg-white px-10 py-6 rounded-[2.5rem] flex justify-between items-center shadow-sm">
+                                            <span className="text-sm font-bold text-[#5D4E40]">🏃🏻‍♀️ {ex.name}</span>
+                                            <div className="flex items-center gap-4"><span className="text-base font-serif text-[#8D7B68] font-bold">-{ex.cal}k</span><button onClick={()=>db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('exerciseLogs').doc(ex.id).delete()} className="text-rose-200 p-2">✕</button></div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'data' && (
+                            <div className="space-y-6 animate-fadeIn pt-4">
+                                <header className="text-center"><h2 className="text-lg font-serif text-[#8D7B68] tracking-widest uppercase">My Stats</h2></header>
+                                <div className="grid grid-cols-2 gap-5">
+                                    <div className="bg-white p-8 rounded-[2.8rem] border border-white shadow-sm text-center">
+                                        <p className="text-[10px] text-[#C4B5A5] font-black uppercase tracking-widest mb-3">AM (kg)</p>
+                                        <input type="number" step="0.1" placeholder="0.0" value={weightLogs.find(w=>w.date===selectedDate)?.morning || ''} 
+                                            onChange={(e) => db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('weightLogs').doc(selectedDate).set({ morning: parseFloat(e.target.value), date: selectedDate, timestamp: Date.now() }, {merge:true})} 
+                                            className="bg-transparent text-2xl font-serif text-[#8D7B68] w-full outline-none text-center font-bold" />
+                                    </div>
+                                    <div className="bg-white p-8 rounded-[2.8rem] border border-white shadow-sm text-center">
+                                        <p className="text-[10px] text-[#C4B5A5] font-black uppercase tracking-widest mb-3">PM (kg)</p>
+                                        <input type="number" step="0.1" placeholder="0.0" value={weightLogs.find(w=>w.date===selectedDate)?.evening || ''} 
+                                            onChange={(e) => db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('weightLogs').doc(selectedDate).set({ evening: parseFloat(e.target.value), date: selectedDate, timestamp: Date.now() }, {merge:true})} 
+                                            className="bg-transparent text-2xl font-serif text-[#8D7B68] w-full outline-none text-center font-bold" />
+                                    </div>
+                                </div>
+                                <div className="bg-white p-10 rounded-[3rem] border border-white shadow-md flex justify-between items-center">
+                                    <div><p className="text-[11px] text-[#C4B5A5] font-black uppercase tracking-[0.2em] mb-2">Daily Hydration</p><span className="text-3xl font-serif text-[#8D7B68]">{dailyHabits.water} <span className="text-xs opacity-40">ml</span></span></div>
+                                    <div className="flex gap-3">
+                                        <button onClick={() => db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('dailyHabits').doc(selectedDate).set({ water: (dailyHabits.water||0)+250 }, {merge:true})} className="w-14 h-14 bg-[#FAF7F2] rounded-full text-[#8D7B68] font-bold shadow-sm active:scale-90 transition-all">+</button>
+                                        <button onClick={() => db.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('dailyHabits').doc(selectedDate).set({ water: 0 }, {merge:true})} className="w-14 h-14 bg-rose-50 rounded-full text-rose-300 font-bold shadow-sm active:scale-90 transition-all">×</button>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </main>
+
+                    <footer className="fixed bottom-0 left-0 w-full pb-10 pt-6 px-8 bg-gradient-to-t from-[#FDFBF9] to-transparent z-[100] flex justify-center">
+                        <div className="w-full max-w-xs bg-white/95 backdrop-blur-2xl border border-white shadow-[0_25px_60px_-10px_rgba(141,123,104,0.4)] rounded-full px-10 py-6 flex justify-between items-center">
+                            <button onClick={() => setActiveTab('home')} className={`p-5 rounded-full transition-all duration-300 ${activeTab === 'home' ? 'tab-active' : 'text-[#D7CCC8]'}`}>🏠</button>
+                            <button onClick={() => setActiveTab('exercise')} className={`p-5 rounded-full transition-all duration-300 ${activeTab === 'exercise' ? 'tab-active' : 'text-[#D7CCC8]'}`}>⚡</button>
+                            <button onClick={() => setActiveTab('data')} className={`p-5 rounded-full transition-all duration-300 ${activeTab === 'data' ? 'tab-active' : 'text-[#D7CCC8]'}`}>👤</button>
+                        </div>
+                    </footer>
+                </div>
+            );
+        };
+
+        window.onload = () => {
+            const root = ReactDOM.createRoot(document.getElementById('root'));
+            root.render(<App />);
+        };
+    </script>
+</body>
+</html>
+
